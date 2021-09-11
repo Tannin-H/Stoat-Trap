@@ -23,6 +23,7 @@ time_t getTime();
 unsigned int getResponse(int timeout);
 void sendSMS();
 void flushBuffer();
+void test_response_time();
 
 void setup()
 {
@@ -38,6 +39,7 @@ void setup()
 
   //test basic AT commands
   establishConnection();
+  //test_response_time();
 
   time_t power_on_time = getTime();
   time_t last_power_on_time;
@@ -93,15 +95,43 @@ void establishConnection(){
   getResponse(1000);
 }
 
+void test_response_time(){
+  SIM800L.println("AT+SAPBR=0,1\r");
+  getResponse(1000);
+
+  //remove if wanting to test time error functionality
+  SIM800L.println("AT+SAPBR=1,1\r");
+  getResponse(3000);
+
+  SIM800L.println("AT+CIPGSMLOC=2,1\r"); //Set to GSM mode
+  long current_time = millis();
+  int current_chars = 0;
+  int previous_chars = 0;
+  int time_since_last_char = 0;
+  int delay_time = 20;
+
+  while(time_since_last_char < 10000){
+    current_chars = SIM800L.available();
+    if (current_chars > previous_chars){
+      time_since_last_char += delay_time;
+      Serial.println("More chars");
+      Serial.println(current_chars);
+      Serial.println(millis()-current_time);
+    }
+    else{
+      time_since_last_char += delay_time;
+    }
+    previous_chars = current_chars;
+    delay(delay_time);
+  }
+}
+
 void waitForGPRS(int setup_delay, int timeout){
   delay(setup_delay);
   SIM800L.println("AT+CREG=?\r"); // Check if the device is registered
   getResponse(1000);
 
   SIM800L.println("AT+CGATT=?\r"); // Configuring TEXT mode
-  getResponse(1000);
-
-  SIM800L.println("AT+CSQ\r"); // Configuring TEXT mode
   getResponse(1000);
 }
 
@@ -110,43 +140,45 @@ unsigned int getResponse(int base_timeout){
   memset(response_array, '\0', sizeof response_array); //clear response array
   unsigned int i = 0, j= 0;
 
-  //processing base timeout and signal quality to produce a max inter-char delay
-  if (rssi == 99){ //if signal strength is unknown
-    delay(base_timeout); //change this - what should default be?
-  }
-  else{
-    delay(base_timeout); //change this too - new equation
-  }
+  int time_since_last_char = 0;
+  int delay_time = 20;
 
-  while (SIM800L.available() > 0){
-    char x = SIM800L.read();
-    if (x != '\n' and x != '\r'){
-      if (j < sizeof(response_array[0])){ //ensure no overflow occurs
-        response_array[i][j] = x;
-        j++;
+  while(time_since_last_char < 10000){ //waits until timeout (UNFINISHED)
+    if (SIM800L.available() > 0){
+      //read new lines as soon as they arrive
+      char x = SIM800L.read();
+      if (x != '\n' and x != '\r'){
+        if (j < sizeof(response_array[0])){ //ensure no overflow occurs
+          response_array[i][j] = x;
+          j++;
+        }
+        else {
+          Serial.println("OVERFLOW");
+        }
       }
       else {
-        Serial.println("OVERFLOW");
+        if (j > 0){ //if line is not empty (ignore empty lines)
+          response_array[i][j] = '\0';  //insert null-character at end of received string
+          if(strcmp("OK", response_array[i]) == 0){ // if OK response recieved (end of response)
+            if (DEBUG_PRINT){
+              for (unsigned int m=0; m<i+1; m++){
+                Serial.println(response_array[m]);
+              }
+              Serial.println(""); //inserts blank line between AT commands
+            }
+            return i;  //i is the number of full rows
+          }
+          i++;
+          j = 0;
+        }
       }
     }
-    else {
-      if (j > 0){ //line is not empty
-        response_array[i][j] = '\0';  //insert null-character at end of received string
-        i++;
-        j = 0;
-      }
+    else{ //increment time since last reception
+      time_since_last_char += delay_time;
     }
+    delay(delay_time);
   }
-
-  if (DEBUG_PRINT){
-    for (unsigned int m=0; m<i; m++){
-      Serial.println(response_array[m]);
-    }
-    Serial.println("");
-  }
-
-  //number of full rows
-  return i - 1;
+  //TIMEOUT CODE HERE
 }
 
 time_t getTime(){
