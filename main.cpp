@@ -7,13 +7,18 @@
 //Create software serial object to communicate with SIM800L
 SoftwareSerial SIM800L(8, 9); //SIM800L Rx & Tx is connected to Arduino #8 & #9
 
-const int rows = 10;
-const int columns = 50;
-const bool debug_print = true;
-char response_array[rows][columns];
+const int ROWS = 10;
+const int COLUMNS = 50;
+const float BASE_RSSI = 20;
+const bool DEBUG_PRINT = true;
+char response_array[ROWS][COLUMNS];
+
+float rssi = 99;//default signal strength, (not yet known)
+float rssi_diff = 1;
 
 //forward declarations
 void establishConnection();
+void waitForGPRS(int setup_delay, int timeout);
 time_t getTime();
 unsigned int getResponse(int timeout);
 void sendSMS();
@@ -25,18 +30,19 @@ void setup()
   pinMode(7, OUTPUT);
   digitalWrite(7, HIGH);
 
-  //test basic AT commands
-  establishConnection();
-
   //check trap status and power off
   pinMode(6, INPUT);
   if (digitalRead(6) == HIGH){
     digitalWrite(7, LOW); //power off without write
   }
 
+  //test basic AT commands
+  establishConnection();
+
   time_t power_on_time = getTime();
   time_t last_power_on_time;
   EEPROM.get(0, last_power_on_time);
+  // get last power on time from EEPROM
 
   //Serial.println(difftime(power_on_time, last_power_on_time));
   if (difftime(power_on_time, last_power_on_time) < 1800){ //30 minutes
@@ -48,11 +54,11 @@ void setup()
 
   //power off with write
   //EEPROM.put(0, power_on_time);
+  //write new time to EEPROM
   digitalWrite(7, LOW);
 }
 
 void loop(){
-
 }
 
 void establishConnection(){
@@ -65,20 +71,57 @@ void establishConnection(){
 
   SIM800L.println("AT\r");
   getResponse(1000);
+
+  SIM800L.println("AT+CSQ\r");
+  int quality_lines = getResponse(5000);
+  char signal_info[strlen(response_array[quality_lines-1]) - strlen("+CSQ: ")];
+  strcpy(signal_info, &response_array[quality_lines-1][strlen("+CSQ: ")]);
+  rssi = atoi(strtok(signal_info, ","));
+  rssi_diff = ((pow(10, (2*BASE_RSSI-114)/10))/(pow(10, (2*rssi-114)/10)));
+  Serial.print("RSSI: ");
+  Serial.println(rssi);
+  Serial.print("Signal Power Difference: ");
+  Serial.println(rssi_diff);
+
+  SIM800L.println("AT+CSCS=\"GSM\"\r"); //Set to GSM mode
+  getResponse(1000);
+
+  SIM800L.println("AT+CMGF=1\r"); // Configuring TEXT mode
+  getResponse(1000);
+
+  SIM800L.println("AT+CNMI=1,2,0,0,0\r"); // Decides how newly arrived SMS messages should be handled
+  getResponse(1000);
 }
 
-unsigned int getResponse(int timeout)
-{
-  memset(response_array, '\0', sizeof response_array); //clear array
-  unsigned int i = 0;
-  unsigned int j = 0;
+void waitForGPRS(int setup_delay, int timeout){
+  delay(setup_delay);
+  SIM800L.println("AT+CREG=?\r"); // Check if the device is registered
+  getResponse(1000);
 
-  delay(timeout);
+  SIM800L.println("AT+CGATT=?\r"); // Configuring TEXT mode
+  getResponse(1000);
+
+  SIM800L.println("AT+CSQ\r"); // Configuring TEXT mode
+  getResponse(1000);
+}
+
+unsigned int getResponse(int base_timeout){
+
+  memset(response_array, '\0', sizeof response_array); //clear response array
+  unsigned int i = 0, j= 0;
+
+  //processing base timeout and signal quality to produce a max inter-char delay
+  if (rssi == 99){ //if signal strength is unknown
+    delay(base_timeout); //change this - what should default be?
+  }
+  else{
+    delay(base_timeout); //change this too - new equation
+  }
 
   while (SIM800L.available() > 0){
     char x = SIM800L.read();
     if (x != '\n' and x != '\r'){
-      if (j < sizeof(response_array[0])){
+      if (j < sizeof(response_array[0])){ //ensure no overflow occurs
         response_array[i][j] = x;
         j++;
       }
@@ -95,15 +138,7 @@ unsigned int getResponse(int timeout)
     }
   }
 
-  //find usage data of array
-  unsigned int num_used_rows = 0;
-  for (int k=0; k<rows; k++){
-    if (strlen(response_array[k]) > 0) {
-      num_used_rows++;
-    }
-  }
-
-  if (debug_print){
+  if (DEBUG_PRINT){
     for (unsigned int m=0; m<i; m++){
       Serial.println(response_array[m]);
     }
