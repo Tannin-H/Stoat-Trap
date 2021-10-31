@@ -5,58 +5,75 @@
 #include <SoftwareSerial.h>
 
 //Create software serial object to communicate with SIM800L
-SoftwareSerial SIM800L(8, 9); //SIM800L Rx & Tx is connected to Arduino #8 & #9
+SoftwareSerial SIM800L(9, 8); //SIM800L Rx & Tx is connected to Arduino #8 & #9
 
 const int ROWS = 10;
 const int COLUMNS = 50;
 const float BASE_RSSI = 20;
 const bool DEBUG_PRINT = true;
+
 char response_array[ROWS][COLUMNS];
+int response_lines;
 
 float rssi = 99;//default signal strength, (not yet known)
 float rssi_diff = 1;
 
 //forward declarations
 void establishConnection();
-void waitForGPRS(int setup_delay, int timeout);
+void GSM_setup();
 time_t getTime();
-unsigned int getResponse(int timeout);
+void getResponse2(int timeout, bool queries_network);
+void getResponse1(int timeout);
 void sendSMS();
 void flushBuffer();
-void test_response_time();
+void reset_SIM();
+void check_position();
 
 void setup()
 {
-  //hold lifeline
+  //hold arduino lifeline
   pinMode(7, OUTPUT);
   digitalWrite(7, HIGH);
 
-  //check trap status and power off
-  pinMode(6, INPUT);
-  if (digitalRead(6) == HIGH){
-    digitalWrite(7, LOW); //power off without write
-  }
+  pinMode(10, OUTPUT);
+  digitalWrite(10, HIGH);
+
+  delay(500);
+
+  //check trap status and power off if in the 'armed' position
+  pinMode(11, INPUT_PULLUP);
+  check_position();
+
+  reset_SIM();
+  check_position();
 
   //test basic AT commands
   establishConnection();
-  //test_response_time();
+  check_position();
 
+  GSM_setup();
+  check_position();
+
+  //get current power on time from network
   time_t power_on_time = getTime();
+  check_position();
+
+  // get last power on time from EEPROM
   time_t last_power_on_time;
   EEPROM.get(0, last_power_on_time);
-  // get last power on time from EEPROM
 
   //Serial.println(difftime(power_on_time, last_power_on_time));
   if (difftime(power_on_time, last_power_on_time) < 1800){ //30 minutes
     //EEPROM.put(0, power_on_time);
-    digitalWrite(7, LOW); //power off with write
+    digitalWrite(7, LOW); //power arduino off
   }
 
-  //sendSMS();
+  sendSMS();
 
-  //power off with write
-  //EEPROM.put(0, power_on_time);
-  //write new time to EEPROM
+ //write most recent time to EEPROM
+  EEPROM.put(0, power_on_time);
+
+  //power arduino off
   digitalWrite(7, LOW);
 }
 
@@ -69,83 +86,86 @@ void establishConnection(){
   flushBuffer();
 
   Serial.print("Initialized");
-  delay(500);
+  delay(1000);
 
   SIM800L.println("AT\r");
-  getResponse(1000);
+  getResponse1(3000);
 
+  for(unsigned int m=0; m<100; m++){
+    SIM800L.println("AT+CGREG?\r"); // Check if the device is registered
+    getResponse1(5000);
+    char reg_info[strlen(response_array[response_lines-1]) - strlen("+CGREG: ")];
+    strcpy(reg_info, &response_array[response_lines-1][strlen("+CGREG: ")]);
+    strtok(reg_info, ",");
+    int reg = atoi(strtok(NULL, ","));
+    if(reg == 0){ //not attempting to attach
+      SIM800L.println("AT+CGREG=1"); //attempt to attach
+      getResponse1(5000);
+      }
+    if(reg == 1){ //attached to network and ready to send/recive commands
+      return;
+    }
+
+
+    delay(5000); //delay between attempts
+  }
+}
+
+void GSM_setup(){
   SIM800L.println("AT+CSQ\r");
-  int quality_lines = getResponse(5000);
-  char signal_info[strlen(response_array[quality_lines-1]) - strlen("+CSQ: ")];
-  strcpy(signal_info, &response_array[quality_lines-1][strlen("+CSQ: ")]);
+  getResponse2(10000, true);
+  char signal_info[strlen(response_array[response_lines-1]) - strlen("+CSQ: ")];
+  strcpy(signal_info, &response_array[response_lines-1][strlen("+CSQ: ")]);
   rssi = atoi(strtok(signal_info, ","));
-  rssi_diff = ((pow(10, (2*BASE_RSSI-114)/10))/(pow(10, (2*rssi-114)/10)));
+  if(rssi != 99 and rssi != 0){
+    rssi_diff = ((pow(10, (2*BASE_RSSI-114)/10))/(pow(10, (2*rssi-114)/10)));
+  }
   Serial.print("RSSI: ");
   Serial.println(rssi);
   Serial.print("Signal Power Difference: ");
   Serial.println(rssi_diff);
+  Serial.println("");
 
   SIM800L.println("AT+CSCS=\"GSM\"\r"); //Set to GSM mode
-  getResponse(1000);
+  getResponse1(1000);
 
   SIM800L.println("AT+CMGF=1\r"); // Configuring TEXT mode
-  getResponse(1000);
+  getResponse1(1000);
 
   SIM800L.println("AT+CNMI=1,2,0,0,0\r"); // Decides how newly arrived SMS messages should be handled
-  getResponse(1000);
+  getResponse1(1000);
 }
 
-void test_response_time(){
-  SIM800L.println("AT+SAPBR=0,1\r");
-  getResponse(1000);
-
-  //remove if wanting to test time error functionality
-  SIM800L.println("AT+SAPBR=1,1\r");
-  getResponse(3000);
-
-  SIM800L.println("AT+CIPGSMLOC=2,1\r"); //Set to GSM mode
-  long current_time = millis();
-  int current_chars = 0;
-  int previous_chars = 0;
-  int time_since_last_char = 0;
-  int delay_time = 20;
-
-  while(time_since_last_char < 10000){
-    current_chars = SIM800L.available();
-    if (current_chars > previous_chars){
-      time_since_last_char += delay_time;
-      Serial.println("More chars");
-      Serial.println(current_chars);
-      Serial.println(millis()-current_time);
-    }
-    else{
-      time_since_last_char += delay_time;
-    }
-    previous_chars = current_chars;
-    delay(delay_time);
-  }
-}
-
-void waitForGPRS(int setup_delay, int timeout){
-  delay(setup_delay);
-  SIM800L.println("AT+CREG=?\r"); // Check if the device is registered
-  getResponse(1000);
-
-  SIM800L.println("AT+CGATT=?\r"); // Configuring TEXT mode
-  getResponse(1000);
-}
-
-unsigned int getResponse(int base_timeout){
+void getResponse2(int base_timeout, bool queries_network){
 
   memset(response_array, '\0', sizeof response_array); //clear response array
+  int timeout;
   unsigned int i = 0, j= 0;
-
   int time_since_last_char = 0;
   int delay_time = 20;
 
-  while(time_since_last_char < 10000){ //waits until timeout (UNFINISHED)
+  if(queries_network){
+    //convert signal quality to a timeout time here (UPDATE THIS METHOD)
+    if(rssi == 99){
+      timeout = 3*base_timeout;
+    }
+    else{
+      Serial.print(rssi_diff*base_timeout);
+      timeout = base_timeout + (rssi_diff*base_timeout);
+    }
+  }
+  else{ //if the command has no network interaction, the timeout duration is fixed
+    timeout = base_timeout;
+  }
+
+  Serial.print("timeout - ");
+  Serial.print(timeout);
+
+
+  while(time_since_last_char < timeout){ //waits until timeout (UNFINISHED)
     if (SIM800L.available() > 0){
       //read new lines as soon as they arrive
+      time_since_last_char = 0;
       char x = SIM800L.read();
       if (x != '\n' and x != '\r'){
         if (j < sizeof(response_array[0])){ //ensure no overflow occurs
@@ -161,12 +181,13 @@ unsigned int getResponse(int base_timeout){
           response_array[i][j] = '\0';  //insert null-character at end of received string
           if(strcmp("OK", response_array[i]) == 0){ // if OK response recieved (end of response)
             if (DEBUG_PRINT){
-              for (unsigned int m=0; m<i+1; m++){
+              for(unsigned int m=0; m<i+1; m++){
                 Serial.println(response_array[m]);
               }
               Serial.println(""); //inserts blank line between AT commands
             }
-            return i;  //i is the number of full rows
+            response_lines = i; //i is the number of full rows
+            return;
           }
           i++;
           j = 0;
@@ -179,34 +200,38 @@ unsigned int getResponse(int base_timeout){
     delay(delay_time);
   }
   //TIMEOUT CODE HERE
+  Serial.println("TIMEOUT");
+}
+
+void getResponse1(int base_timeout){
+  getResponse2(base_timeout, false); //uese default argument
 }
 
 time_t getTime(){
   SIM800L.println("AT+SAPBR=0,1\r");
-  getResponse(1000);
+  getResponse1(5000);
 
-  //remove if wanting to test time error functionality
+  //remove this line to test time error functionality
   SIM800L.println("AT+SAPBR=1,1\r");
-  getResponse(3000);
+  getResponse1(5000);
 
   SIM800L.println("AT+CIPGSMLOC=2,1\r");
-  int time_lines = getResponse(10000);
+  getResponse2(10000, true);
 
-  if (strcmp("OK", response_array[time_lines]) == 0){
+  if (strcmp("OK", response_array[response_lines-1]) == 0){
     Serial.println("Time response line: ");
-    Serial.println(response_array[time_lines-1]);
+    Serial.println(response_array[response_lines-1]);
 
     //declare new string with enough room to fit time data without prefix
     char strip_string[] = "+CIPGSMLOC: ";
-    char current_time[strlen(response_array[time_lines-1]) - strlen(strip_string)];
-    strcpy(current_time, &response_array[time_lines-1][strlen(strip_string)]);
+    char current_time[strlen(response_array[response_lines-1]) - strlen(strip_string)];
+    strcpy(current_time, &response_array[response_lines-1][strlen(strip_string)]);
 
     //if only location code is returned, it must be an error
     if (strstr(current_time, ",") == NULL){
       Serial.println("Error fetching time; Non-zero location code");
     }
 
-    //otherwise parse date and time info
     char *date;
     char *time;
     strtok(current_time, ","); //remove location code
@@ -239,7 +264,6 @@ time_t getTime(){
   else{
     Serial.println("Error fetching time; Response was not 'OK'");
   }
-
 }
 
 void flushBuffer(){
@@ -251,17 +275,31 @@ void flushBuffer(){
 
 void sendSMS(){
   SIM800L.print("AT+CMGF=1\r");
-  getResponse(500);
+  getResponse1(1000);
 
   // USE INTERNATIONAL FORMAT CODE FOR MOBILE NUMBERS
-  SIM800L.println("AT+CMGS=\"+64277606066\""); //+64277606066
-  getResponse(500);
+  SIM800L.print("AT+CMGS=\"+64277606066\"\r"); //+64277606066
+  getResponse1(5000);
 
   //Message to send
-  SIM800L.println("Test");
-  getResponse(500);
+  SIM800L.print("Your stoat trap was set off");
+  getResponse1(5000);
 
   // End AT command with a ^Z, ASCII code 26
   SIM800L.println((char)26);
-  getResponse(10000);
+  getResponse2(15000, true);
+  delay(15000);
+}
+
+void reset_SIM(){
+  digitalWrite(10, LOW);
+  delay(100);
+  digitalWrite(10, HIGH);
+  delay(5000);
+}
+
+void check_position(){
+  if (digitalRead(11)){
+    digitalWrite(7, LOW);
+  }
 }
